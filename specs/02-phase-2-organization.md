@@ -1,6 +1,18 @@
 # Spec 02 — Phase 2: Organization
 
-**Status: Planned.** Source of truth: VISION.md §4.2. Still 100% offline; no AI.
+**Status: Implemented.** Source of truth: VISION.md §4.2. Still 100% offline; no AI.
+
+Implementation notes: SQLite schema v2 adds `groups`, `tags`, `note_tags`, and
+`notes.group_id`. Note assignments (`groupId`, `tags`) live in each note's
+frontmatter (source of truth) and are indexed into SQLite; tag/group definitions
+live in SQLite. Definition changes that affect notes (delete group, rename/delete
+tag) propagate into the affected notes' frontmatter via `OrganizationService`.
+Search is unified in `Store.queryNotes({ text?, groupId?, tagIds? })` — FTS +
+group-with-descendants (recursive CTE) + tag AND. Tag colors are deterministic
+from the tag name (stable across sessions). Verified: 22 Vitest tests + typecheck
++ build. Files: `src/main/services/organization.ts`, extended `db/store.ts`,
+`db/migrations.ts`, `services/notes.ts`; renderer `GroupTree`, `TagBar`,
+`NoteMetaBar`, rewritten `NotesPage`; `test/phase2.test.ts`.
 
 ## Goal
 

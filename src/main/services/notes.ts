@@ -3,7 +3,7 @@ import path from 'node:path'
 import matter from 'gray-matter'
 import { z } from 'zod'
 import type { Store } from '../db/store'
-import type { Note, NoteSummary, NoteVersion, SearchResult, NoteSaveInput } from '@shared/types'
+import type { Note, NoteSummary, NoteVersion, SearchResult, NoteSaveInput, NoteQuery } from '@shared/types'
 import {
   ONTOLOGY_VERSION,
   DEFAULT_NOTE_REVIEW_STATUS,
@@ -29,9 +29,17 @@ const frontmatterSchema = z.object({
   id: z.string().optional(),
   ownerId: z.string().optional(),
   ontologyVersion: z.string().optional(),
-  title: z.union([z.string(), z.number()]).optional().transform((v) => (v == null ? undefined : String(v))),
+  title: z
+    .union([z.string(), z.number()])
+    .optional()
+    .transform((v) => (v == null ? undefined : String(v))),
   reviewStatus: z.string().optional(),
   sensitivity: z.string().optional(),
+  groupId: z.string().nullable().optional(),
+  tags: z
+    .array(z.union([z.string(), z.number()]))
+    .optional()
+    .transform((arr) => (arr ? arr.map((t) => String(t).trim()).filter(Boolean) : [])),
   createdAt: isoString,
   updatedAt: isoString,
   lastConfirmedAt: isoOrNull
@@ -40,7 +48,7 @@ const frontmatterSchema = z.object({
 /**
  * Notes are markdown files with YAML frontmatter in `<workingFolder>/notes/`.
  * The files are the source of truth; the SQLite Store holds a rebuildable
- * index + FTS + version history (VISION.md §4.1, §5.1a).
+ * index + FTS + version history + tag-assignment index (VISION.md §4.1, §5.1a).
  */
 export class NoteService {
   private readonly notesDir: string
@@ -84,6 +92,8 @@ export class NoteService {
       title: fm.title || 'Untitled',
       reviewStatus: (fm.reviewStatus as Note['reviewStatus']) || DEFAULT_NOTE_REVIEW_STATUS,
       sensitivity: (fm.sensitivity as Note['sensitivity']) || DEFAULT_NOTE_SENSITIVITY,
+      groupId: fm.groupId ?? null,
+      tags: fm.tags ?? [],
       createdAt: fm.createdAt || now,
       updatedAt: fm.updatedAt || now,
       lastConfirmedAt: fm.lastConfirmedAt,
@@ -91,7 +101,18 @@ export class NoteService {
     }
   }
 
-  async create(): Promise<Note> {
+  /** Persist a full note: write the file and refresh all SQLite indexes. */
+  private async write(note: Note, opts: { snapshot: boolean }): Promise<Note> {
+    const fp = this.filePath(note.id)
+    await fs.writeFile(fp, this.serialize(note), 'utf8')
+    this.store.upsertNoteIndex(this.summaryOf(note, fp))
+    this.store.setFts(note.id, note.title, note.body)
+    this.store.syncNoteTags(this.ownerId, note.id, note.tags)
+    if (opts.snapshot) this.maybeSnapshot(note)
+    return note
+  }
+
+  async create(groupId: string | null = null): Promise<Note> {
     const now = new Date().toISOString()
     const note: Note = {
       id: crypto.randomUUID(),
@@ -100,16 +121,14 @@ export class NoteService {
       title: 'Untitled',
       reviewStatus: DEFAULT_NOTE_REVIEW_STATUS,
       sensitivity: DEFAULT_NOTE_SENSITIVITY,
+      groupId,
+      tags: [],
       createdAt: now,
       updatedAt: now,
       lastConfirmedAt: null,
       body: ''
     }
-    const fp = this.filePath(note.id)
-    await fs.writeFile(fp, this.serialize(note), 'utf8')
-    this.store.upsertNoteIndex(this.summaryOf(note, fp))
-    this.store.setFts(note.id, note.title, note.body)
-    return note
+    return this.write(note, { snapshot: false })
   }
 
   async get(id: string): Promise<Note | null> {
@@ -134,22 +153,32 @@ export class NoteService {
           title: input.title || 'Untitled',
           reviewStatus: DEFAULT_NOTE_REVIEW_STATUS,
           sensitivity: DEFAULT_NOTE_SENSITIVITY,
+          groupId: null,
+          tags: [],
           createdAt: now,
           updatedAt: now,
           lastConfirmedAt: null,
           body: input.body
         }
-
-    const fp = this.filePath(id)
-    await fs.writeFile(fp, this.serialize(note), 'utf8')
-    this.store.upsertNoteIndex(this.summaryOf(note, fp))
-    this.store.setFts(note.id, note.title, note.body)
-    this.maybeSnapshot(note, now)
-    return note
+    return this.write(note, { snapshot: true })
   }
 
-  private maybeSnapshot(note: Note, now: string): void {
+  async setGroup(id: string, groupId: string | null): Promise<Note | null> {
+    const note = await this.get(id)
+    if (!note) return null
+    return this.write({ ...note, groupId, updatedAt: new Date().toISOString() }, { snapshot: false })
+  }
+
+  async setTags(id: string, tags: string[]): Promise<Note | null> {
+    const note = await this.get(id)
+    if (!note) return null
+    const clean = Array.from(new Set(tags.map((t) => t.trim()).filter(Boolean)))
+    return this.write({ ...note, tags: clean, updatedAt: new Date().toISOString() }, { snapshot: false })
+  }
+
+  private maybeSnapshot(note: Note): void {
     const latest = this.store.listVersions(note.id)[0]
+    const now = note.updatedAt
     if (latest && Date.parse(now) - Date.parse(latest.createdAt) < VERSION_THROTTLE_MS) return
     this.store.addVersion(note.id, this.serialize(note), now)
   }
@@ -168,6 +197,10 @@ export class NoteService {
     return this.store.listNoteIndex()
   }
 
+  query(filter: NoteQuery): SearchResult[] {
+    return this.store.queryNotes(filter)
+  }
+
   search(query: string): SearchResult[] {
     return this.store.search(query)
   }
@@ -180,12 +213,13 @@ export class NoteService {
     const version = this.store.getVersion(versionId)
     if (!version) return null
     const restored = this.parse(version.noteId, version.content)
-    return this.save(restored.id, { title: restored.title, body: restored.body })
+    return this.write({ ...restored, updatedAt: new Date().toISOString() }, { snapshot: true })
   }
 
   /**
-   * Reconcile the SQLite index/FTS with the working folder (the source of
-   * truth): index every `*.md` file and drop rows for files that vanished.
+   * Reconcile the SQLite indexes with the working folder (the source of
+   * truth): index every `*.md` file (frontmatter group + tags included) and
+   * drop rows for files that vanished.
    */
   async reconcile(): Promise<void> {
     let entries: string[] = []
@@ -204,6 +238,7 @@ export class NoteService {
         const note = this.parse(id, await fs.readFile(fp, 'utf8'))
         this.store.upsertNoteIndex(this.summaryOf(note, fp))
         this.store.setFts(note.id, note.title, note.body)
+        this.store.syncNoteTags(this.ownerId, note.id, note.tags)
         seen.add(note.id)
       } catch {
         // Skip unreadable/invalid files rather than failing the whole scan.

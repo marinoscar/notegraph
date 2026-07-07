@@ -5,7 +5,7 @@ These specs turn `VISION.md` and `docs/ONTOLOGY.md` into an executable, phase-by
 | Spec | Phase | Status |
 |---|---|---|
 | [01](./01-phase-1-desktop-shell-notes.md) | Desktop Shell + Notes | **Implemented** |
-| [02](./02-phase-2-organization.md) | Organization (groups, tags, richer search) | Planned |
+| [02](./02-phase-2-organization.md) | Organization (groups, tags, richer search) | **Implemented** |
 | [03](./03-phase-3-documents-ontology-graph.md) | Documents + Ontology + Graph | Planned |
 | [04](./04-phase-4-ai-over-corpus.md) | AI Over the Corpus (Copilot SDK) | Planned |
 | [05](./05-phase-5-agent-work-capture.md) | Agent Work Capture | Planned |

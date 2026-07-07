@@ -52,7 +52,7 @@ Both are new in 2025–2026 — confirm against the versions you pin rather than
 
 ## Commands
 
-Phase 1 (Desktop Shell + Notes) is implemented — an electron-vite + React 18 + MUI 6 app.
+Phases 1–2 are implemented — an electron-vite + React 18 + MUI 6 app (notes, plus hierarchical groups, tags, and filtered search).
 
 - `npm install` — install deps (native modules: `better-sqlite3`, `@ladybugdb/core`).
 - `npm run dev` — launch the app in development (needs a display).
@@ -63,7 +63,7 @@ Phase 1 (Desktop Shell + Notes) is implemented — an electron-vite + React 18 +
 
 ## Layout
 
-- `src/main/` — Electron main: `db/` (better-sqlite3 Store + migrations), `services/` (notes, workspace, ladybug), `ipc/`. Owns all disk/DB access.
+- `src/main/` — Electron main: `db/` (better-sqlite3 Store + migrations), `services/` (notes, organization, workspace, ladybug), `ipc/`. Owns all disk/DB access.
 - `src/preload/` — `contextBridge` exposing the typed `window.notegraph` API.
 - `src/renderer/` — React + MUI UI (pages, components, CodeMirror editor).
 - `src/shared/` — cross-process types, ontology constants, IPC contract (`api.ts`).

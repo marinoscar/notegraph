@@ -8,6 +8,10 @@ export interface NoteFrontmatter {
   title: string
   reviewStatus: ReviewStatus
   sensitivity: Sensitivity
+  /** Group assignment (Phase 2). Null = ungrouped. Travels with the file. */
+  groupId: string | null
+  /** Applied tag names (Phase 2). Travels with the file. */
+  tags: string[]
   createdAt: string
   updatedAt: string
   lastConfirmedAt: string | null
@@ -29,11 +33,39 @@ export interface NoteVersion {
   createdAt: string
 }
 
-/** A full-text search hit with an HTML-free text snippet. */
+/** A notes-query hit: title, an HTML-free snippet (empty when no text term), and recency. */
 export interface SearchResult {
   id: string
   title: string
   snippet: string
+  updatedAt: string
+}
+
+/** A hierarchical group (Phase 2). Definition lives in SQLite. */
+export interface Group {
+  id: string
+  ownerId: string
+  parentGroupId: string | null
+  name: string
+  color: string | null
+  createdAt: string
+}
+
+/** A polymorphic tag (Phase 2). Definition lives in SQLite. */
+export interface Tag {
+  id: string
+  ownerId: string
+  name: string
+  color: string | null
+}
+
+/** Combined filter for the notes list (Phase 2). */
+export interface NoteQuery {
+  text?: string
+  /** Restrict to this group and its descendants. */
+  groupId?: string | null
+  /** Restrict to notes carrying ALL of these tag ids. */
+  tagIds?: string[]
 }
 
 export type ThemeMode = 'light' | 'dark' | 'system'

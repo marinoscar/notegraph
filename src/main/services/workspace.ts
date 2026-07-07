@@ -1,5 +1,6 @@
 import { Store } from '../db/store'
 import { NoteService } from './notes'
+import { OrganizationService } from './organization'
 import type { AppSettings, ThemeMode } from '@shared/types'
 
 const KEY_WORKING_FOLDER = 'workingFolderPath'
@@ -15,6 +16,7 @@ export class Workspace {
   readonly store: Store
   readonly ownerId: string
   private notes: NoteService | null = null
+  private org: OrganizationService | null = null
 
   constructor(dbPath: string) {
     this.store = new Store(dbPath)
@@ -42,20 +44,22 @@ export class Workspace {
     this.store.setSetting(KEY_THEME, theme)
   }
 
-  /** Build the NoteService for a working folder and index its contents. */
-  async setWorkingFolder(folderPath: string): Promise<void> {
-    this.store.setSetting(KEY_WORKING_FOLDER, folderPath)
+  private async attach(folderPath: string): Promise<void> {
     this.notes = new NoteService(this.store, this.ownerId, folderPath)
     await this.notes.init()
+    this.org = new OrganizationService(this.store, this.notes, this.ownerId)
+  }
+
+  /** Build the services for a working folder and index its contents. */
+  async setWorkingFolder(folderPath: string): Promise<void> {
+    this.store.setSetting(KEY_WORKING_FOLDER, folderPath)
+    await this.attach(folderPath)
   }
 
   /** On boot, re-attach to a previously chosen working folder if present. */
   async restore(): Promise<void> {
     const folderPath = this.store.getSetting(KEY_WORKING_FOLDER)
-    if (folderPath) {
-      this.notes = new NoteService(this.store, this.ownerId, folderPath)
-      await this.notes.init()
-    }
+    if (folderPath) await this.attach(folderPath)
   }
 
   hasWorkingFolder(): boolean {
@@ -68,6 +72,14 @@ export class Workspace {
       throw new Error('No working folder selected. Choose one in Settings first.')
     }
     return this.notes
+  }
+
+  /** Access the OrganizationService, or throw if no folder is set. */
+  requireOrg(): OrganizationService {
+    if (!this.org) {
+      throw new Error('No working folder selected. Choose one in Settings first.')
+    }
+    return this.org
   }
 
   close(): void {

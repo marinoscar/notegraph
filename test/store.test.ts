@@ -36,6 +36,8 @@ describe('Store notes index + FTS', () => {
     sensitivity: 'business' as const,
     reviewStatus: 'accepted' as const,
     ontologyVersion: '0.2.0',
+    groupId: null,
+    tags: [] as string[],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-02T00:00:00.000Z',
     lastConfirmedAt: null
