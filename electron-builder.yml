@@ -1,0 +1,26 @@
+appId: cr.marin.notegraph
+productName: notegraph
+directories:
+  buildResources: build
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!specs/*'
+  - '!docs/*'
+  - '!test/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintrc.cjs,.prettierrc,tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!{VISION.md,README.md,CLAUDE.md}'
+asarUnpack:
+  - resources/**
+  - '**/*.node'
+npmRebuild: true
+win:
+  target: nsis
+mac:
+  target: dmg
+  category: public.app-category.productivity
+linux:
+  target: AppImage
+  category: Office

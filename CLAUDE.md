@@ -52,4 +52,20 @@ Both are new in 2025–2026 — confirm against the versions you pin rather than
 
 ## Commands
 
-No build/lint/test commands exist yet. Once tooling lands (`package.json`, Electron scaffold), document here: how to run in dev (`npm run electron:dev`), package (`electron-builder`), and run tests (including a single test).
+Phase 1 (Desktop Shell + Notes) is implemented — an electron-vite + React 18 + MUI 6 app.
+
+- `npm install` — install deps (native modules: `better-sqlite3`, `@ladybugdb/core`).
+- `npm run dev` — launch the app in development (needs a display).
+- `npm run build` — bundle main/preload/renderer to `out/`.
+- `npm run package` — build + `electron-builder` installer to `dist/` (rebuilds native modules for Electron's ABI).
+- `npm run typecheck` — `tsc` for both the node (main/preload) and web (renderer) project refs.
+- `npm test` — Vitest unit tests for main-process services (`npx vitest run test/notes.test.ts` for a single file).
+
+## Layout
+
+- `src/main/` — Electron main: `db/` (better-sqlite3 Store + migrations), `services/` (notes, workspace, ladybug), `ipc/`. Owns all disk/DB access.
+- `src/preload/` — `contextBridge` exposing the typed `window.notegraph` API.
+- `src/renderer/` — React + MUI UI (pages, components, CodeMirror editor).
+- `src/shared/` — cross-process types, ontology constants, IPC contract (`api.ts`).
+- `specs/` — per-phase build specs (00 overview + 01–05); `01` is the implemented one.
+- Three stores at runtime: the user's **working folder** (`notes/*.md`, source of truth), `userData/notegraph.sqlite` (settings/index/FTS/versions), `userData/notegraph.ladybug` (graph; opened in Phase 1, populated in Phase 3).
