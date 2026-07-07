@@ -20,11 +20,15 @@ A **local-first personal knowledge graph desktop app**: your notes, documents, a
 These are load-bearing. Do not violate them without an explicit decision recorded in `VISION.md`:
 
 - **Delivery is an Electron desktop app** (Windows/macOS/Linux). Main process owns the graph, filesystem, ingestion pipeline, local embedding model, and AI client; the React renderer is UI-only and talks to main over IPC. No server backend.
-- **The graph is LadybugDB** — embedded, in-process, Cypher. One on-disk store for graph + chunks + vectors + app metadata. No Neo4j server, no Postgres, no pgvector, no Redis/BullMQ (background work runs in `worker_threads` / an Electron `utilityProcess`).
+- **Three local stores, kept separate** (VISION.md §5.1a):
+  - **Working folder** — user-configurable in Settings; holds content (markdown notes, imported documents, agent-work inbox). This is the **source of truth**, and the user picks the location so their data is durable/referenceable. Never bury content in an opaque path.
+  - **SQLite file** — app settings and non-content metadata: preferences, the working-folder path, groups/tags, the job queue, the `AiInvocation` usage log, and stored extraction outputs. Anything that is "settings or metadata for the app" goes here, **not** in LadybugDB.
+  - **LadybugDB** — embedded, in-process, Cypher; holds only the derived graph + chunks + vectors. It is a **rebuildable projection** of the working folder + SQLite; it must never hold unique source-of-truth data.
+- No Neo4j server, no Postgres, no pgvector, no Redis/BullMQ (background work runs in `worker_threads` / an Electron `utilityProcess` with a SQLite-backed job queue).
 - **AI runs through the GitHub Copilot SDK only in v1**, and always behind the `AiProvider` abstraction — never call the SDK directly from feature code. `AgentProvider` (Copilot, network) is split from `EmbeddingProvider` (local, offline). OpenAI/Anthropic are future providers behind the same interface.
 - **Embeddings are local** (bundled ONNX / `transformers.js`). Never send text to a remote embedding API.
-- **Zero external connectivity except the Copilot SDK.** No cloud DB, object storage, cloud STT, telemetry, or CDN fetches. Notes, documents, search, and the graph view must work fully offline; only entity extraction and the assistant may touch the network.
-- **Content files on disk are the source of truth; LadybugDB is a rebuildable projection.** Preserve the ability to wipe and re-project the graph from disk.
+- **Zero external connectivity except the Copilot SDK.** No cloud DB, object storage, cloud STT, telemetry, or CDN fetches, and **no data is ever uploaded for storage** — all persistence is local (working folder + SQLite + LadybugDB). Notes, documents, search, and the graph view must work fully offline; only entity extraction and the assistant may touch the network.
+- **Working folder + SQLite are the source of truth; LadybugDB is a rebuildable projection.** Persist extraction outputs in SQLite so `Rebuild graph` re-projects fully offline (no Copilot re-calls). Preserve the ability to wipe and rebuild LadybugDB at any time.
 - **Single local user.** No OAuth/JWT/RBAC; the only external identity is the GitHub account used for Copilot. Still scope records by `ownerId` for forward-compatibility with the shared ontology.
 
 ## Build phases (see VISION.md §4)

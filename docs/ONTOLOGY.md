@@ -5,7 +5,7 @@
 **Project:** notegraph
 **Namespace:** `ng:` / `https://notegraph.local/ns#`
 **Primary graph engine:** LadybugDB (embedded property graph, Cypher)
-**System of record:** local content files on disk (+ LadybugDB as a rebuildable projection)
+**System of record:** local content files in a user-configurable working folder, plus a SQLite app database (+ LadybugDB as a rebuildable projection)
 **Status:** Draft specification
 **Ontology version:** `0.2.0`
 
@@ -117,9 +117,9 @@ A good problem-solving memory stores not only the final solution but what did no
 
 ### 3.6 LadybugDB Is a Projection
 
-The **local content files on disk** — markdown notes, imported documents, and agent-work summaries — are the system of record. LadybugDB is a denormalized graph projection optimized for traversal, exploration, semantic (vector) search, and structural retrieval.
+The **local content files in the user's working folder** — markdown notes, imported documents, and agent-work summaries — together with the **SQLite app database** (settings + stored extraction outputs) are the system of record. LadybugDB is a denormalized graph projection optimized for traversal, exploration, semantic (vector) search, and structural retrieval.
 
-The graph must be rebuildable from the content files plus stored extraction outputs. Never treat LadybugDB as the only source of truth: wiping the database and re-projecting from disk must always reproduce an equivalent graph.
+The graph must be rebuildable from the working-folder content plus the extraction outputs stored in SQLite — with no network calls. Never treat LadybugDB as the only source of truth: wiping the database and re-projecting must always reproduce an equivalent graph.
 
 ### 3.7 Practical Property Graph Modeling
 
@@ -910,7 +910,7 @@ Failed attempts are a high-value part of the graph. Do not delete them just beca
 
 ### 9.7 LadybugDB Must Stay Rebuildable
 
-Store canonical records as content files on disk, keep original imported documents, and rebuild LadybugDB through a deterministic projection step. The graph is always reconstructible from the files plus stored extraction outputs.
+Store canonical records as content files in the working folder, keep original imported documents, persist extraction outputs and app metadata in the SQLite app database, and rebuild LadybugDB through a deterministic projection step. The graph is always reconstructible — offline — from the working folder plus the SQLite-stored extraction outputs.
 
 ### 9.8 Duplicate Resolution: Profile-Based Disambiguation
 

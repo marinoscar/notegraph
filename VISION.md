@@ -47,7 +47,7 @@ The two projects share an ontology and a philosophy; they differ in delivery and
 | Dimension | knotes | **notegraph** |
 |---|---|---|
 | Delivery | React SPA + NestJS API on a VPS (`knotes.marin.cr`) | **Electron desktop app** (Windows / macOS / Linux) |
-| Where data lives | Postgres + Neo4j server + AWS S3 (cloud) | **All local**: LadybugDB file + content files on disk |
+| Where data lives | Postgres + Neo4j server + AWS S3 (cloud) | **All local**: a user-chosen working folder (content) + a SQLite app-metadata file + the LadybugDB graph file |
 | Graph engine | Neo4j Community 5 (server / container) | **LadybugDB** (embedded, in-process, Cypher) |
 | Vector / semantic search | OpenAI `text-embedding-3-small` + pgvector | **Bundled local embedding model** + LadybugDB vector index |
 | AI connectivity | Multi-provider cloud (OpenAI / Anthropic / OpenAI-compatible) + Whisper | **GitHub Copilot SDK only (v1)**; pluggable to OpenAI / Anthropic later |
@@ -55,7 +55,7 @@ The two projects share an ontology and a philosophy; they differ in delivery and
 | Capture surfaces | Speech + Text + Work (audio-heavy, cloud STT) | **Text / notes + Documents + Work** first; local audio deferred |
 | Background infra | Redis + BullMQ + worker services | **In-process pipeline** (worker threads / Electron `utilityProcess`); no Redis |
 | Auth | Google OAuth + JWT + RBAC | **Single local user**; GitHub auth only to reach Copilot |
-| System of record | Postgres authoritative; Neo4j is a projection | **Content files on disk** authoritative; LadybugDB is a rebuildable projection |
+| System of record | Postgres authoritative; Neo4j is a projection | **Working-folder content files + SQLite app db** authoritative; LadybugDB is a rebuildable projection |
 
 ---
 
@@ -148,8 +148,9 @@ notegraph is built in five value-first phases. Each phase ships independently an
 **In scope**:
 - Electron scaffold: main process + renderer + IPC, cross-platform packaging (Windows / macOS / Linux)
 - Notes module: markdown editor (CodeMirror 6), autosave, version history
-- Local file storage: notes persist as markdown files in the app data directory
-- LadybugDB initialized as the embedded store (opens a database file on disk)
+- **Working-folder setting**: a Settings screen where the user picks the folder that holds their content; notes persist there as markdown files (the source of truth), with a sensible per-OS default
+- **SQLite app database** initialized for settings and metadata (starting with the working-folder path and preferences)
+- LadybugDB initialized as the embedded graph store (opens a database file on disk)
 - Local full-text search over notes
 - **Ontology metadata on every note from day one** (zero cost now, expensive retrofit later): `ownerId` (a local user id), `ontologyVersion`, `reviewStatus` (default `accepted`, since user-authored), `sensitivity` (default `business`, user-editable), `createdAt`, `updatedAt`, `lastConfirmedAt`
 
@@ -215,7 +216,7 @@ All of these use the `AiProvider` abstraction (§7); local embedding similarity 
 **In scope**:
 - A capture **skill** (`notegraph-capture`) produces a structured markdown summary at session end (template maps 1:1 to ontology nodes)
 - A Stop hook auto-invokes the skill
-- The skill writes to a **local inbox folder** (`~/.notegraph/inbox/*.agent-work.md`) — no cloud upload
+- The skill writes to a **local inbox folder inside the working folder** (`<working-folder>/inbox/*.agent-work.md`) — no cloud upload
 - An `AgentWorkProcessor` (in-process) parses the markdown and creates `AgentRun`, `Problem`, `Attempt`, `Resolution`, `Runbook`, `CodeChange`, `CommandRun`, `ReusablePattern` nodes
 - UI to browse `AgentRun` history and derived runbooks
 - "Find similar prior work" query (Scenarios 4 and 9 in `ONTOLOGY.md §13`)
@@ -249,10 +250,20 @@ Out of scope across all phases (unless explicitly added later):
 
 notegraph has no server. It is an Electron app with a clear split between the privileged main process and the UI:
 
-- **Main process (Node.js)** owns everything local: the LadybugDB connection, the filesystem (notes + documents + inbox), the ingestion pipeline, the local embedding model, and the Copilot SDK client. This is the only place that opens files or the network.
+- **Main process (Node.js)** owns everything local: the working folder (notes + documents + inbox), the SQLite app database, the LadybugDB connection, the ingestion pipeline, the local embedding model, and the Copilot SDK client. This is the only place that opens files or the network.
 - **Renderer (React)** is the UI: the markdown editor, the document viewer, hybrid search, and the graph view. It holds no secrets and makes no direct network or disk calls.
 - **IPC** connects them: the renderer calls typed IPC handlers in main for reads, writes, search, extraction, and assistant turns.
-- **Background jobs** (parse → chunk → embed → extract → project) run off the UI thread via Node `worker_threads` or an Electron `utilityProcess`. A small persisted job table in LadybugDB replaces Redis/BullMQ.
+- **Background jobs** (parse → chunk → embed → extract → project) run off the UI thread via Node `worker_threads` or an Electron `utilityProcess`. A small persisted job queue in the **SQLite app database** replaces Redis/BullMQ.
+
+### 5.1a Three Local Stores
+
+notegraph keeps its data in three clearly-separated local places — nothing else:
+
+1. **Working folder** *(user-configurable in Settings)* — the durable **source of truth** for content: markdown notes, imported documents (kept in their original form + extracted text), and the agent-work inbox. The user picks this folder so their data lives somewhere they can find, back up, and reference outside the app. notegraph defaults it to a sensible per-OS location and lets the user change it (and point at an existing folder).
+2. **SQLite app database** — a single `.sqlite` file holding **app settings and non-content metadata**: preferences, window/UI state, the working-folder path, group hierarchy and tag definitions, the background-job queue, the `AiInvocation` usage log, and the stored extraction outputs needed to re-project the graph offline. This is durable app state that must survive a graph rebuild.
+3. **LadybugDB file** — the **rebuildable graph projection**: ontology nodes + relationships, `Chunk` records, and their local embeddings (vector index). It holds no unique source-of-truth data; it can be wiped and re-projected from (1) + (2) at any time, with no network calls.
+
+Rule of thumb: **content → working folder; app settings & metadata → SQLite; the derived knowledge graph → LadybugDB.**
 
 ### 5.2 High-Level Diagram
 
@@ -267,9 +278,14 @@ notegraph has no server. It is an Electron app with a clear split between the pr
    ┌───────────────────────────┴───────────────────────────────┐
    │  Main process (Node)                                       │
    │                                                            │
-   │   Notes/Docs service ──► [ Local files on disk ]           │
-   │                          (markdown notes, imported docs,   │
-   │                           ~/.notegraph/inbox agent summaries)
+   │   Notes/Docs service ──► [ Working folder (user-chosen) ]  │
+   │                          markdown notes · imported docs ·  │
+   │                          agent-work inbox   (SOURCE OF TRUTH)
+   │                                                            │
+   │   Settings/metadata  ──► [ SQLite app db (.sqlite) ]       │
+   │                          preferences · working-folder path │
+   │                          groups · tags · job queue ·       │
+   │                          AiInvocation log · extraction outputs
    │                                                            │
    │   Ingestion pipeline (worker_threads / utilityProcess)     │
    │     parse → chunk → embed → extract → project              │
@@ -277,8 +293,8 @@ notegraph has no server. It is an Electron app with a clear split between the pr
    │        │        │       │        │         └─► LadybugDB    │
    │        │        │       │        │             (graph +     │
    │        │        │       │        │              chunks +    │
-   │        │        │       │        │              vectors +   │
-   │        │        │       │        │              app meta)   │
+   │        │        │       │        │              vectors)    │
+   │        │        │       │        │           REBUILDABLE    │
    │        │        │       └─► [ Local embedding model ]       │
    │        │        │            (ONNX / transformers.js)       │
    │        │        │            fully offline                  │
@@ -296,11 +312,13 @@ notegraph has no server. It is an Electron app with a clear split between the pr
 
 ### 5.3 Key Architectural Decisions
 
-- **LadybugDB is the embedded store.** An in-process property-graph database (the KuzuDB successor; "DuckDB for graphs"), it needs no server and speaks Cypher — so the knotes ontology, already expressed in Cypher, ports over directly. It holds the graph, the chunks, the vector index, and app metadata in one on-disk database file.
-- **One store, not three.** knotes used Postgres (system of record) + Neo4j (projection) + pgvector (embeddings). notegraph collapses these: the durable **source of truth is the content files on disk** (markdown notes + imported documents + agent-work summaries), and LadybugDB is a **rebuildable projection** of the graph + chunks + embeddings derived from them. Wipe LadybugDB and re-project from the files at any time.
+- **Three local stores, cleanly separated** (see §5.1a): the **working folder** (content, source of truth), the **SQLite app database** (settings + non-content metadata), and the **LadybugDB file** (rebuildable graph projection). knotes used Postgres (system of record) + Neo4j (projection) + pgvector (embeddings), all cloud-hosted; notegraph replaces that whole stack with these three local files/folders.
+- **The user picks the working folder.** Persisted content — documents especially — lives in a folder the user chooses in Settings, so their data is kept somewhere durable and referenceable outside the app (findable, backupable, portable). notegraph never hides content in an opaque location.
+- **App settings & metadata are a SQLite file.** Preferences, window state, the working-folder path, groups/tags, the job queue, the usage log, and stored extraction outputs live in a single SQLite `.sqlite` database — not in LadybugDB and not scattered across ad-hoc files. This is the durable app-state layer that survives a graph rebuild.
+- **LadybugDB is the graph engine, and it is rebuildable.** An in-process property-graph database (the KuzuDB successor; "DuckDB for graphs"), it needs no server and speaks Cypher — so the knotes ontology, already expressed in Cypher, ports over directly. It holds only derived data (graph + chunks + vector index); wipe it and re-project from the working folder + SQLite at any time, with no network calls.
 - **Embeddings are local.** A bundled embedding model (ONNX / `transformers.js`) computes vectors in-process. Semantic search never touches the network. (LadybugDB's vector-index API is the intended index; confirm the exact API against the LadybugDB version pinned at build time — see §12.)
 - **Copilot SDK is the only egress.** Entity extraction and the assistant are the sole network-touching features, and they route through exactly one provider. Notes, documents, organization, search, and graph exploration all work with the network disabled.
-- **In-process pipeline.** Background work runs in worker threads / a utility process with a persisted job table — no Redis, no external broker.
+- **In-process pipeline.** Background work runs in worker threads / a utility process with a persisted job queue in SQLite — no Redis, no external broker.
 - **Single local user.** No OAuth, no JWT, no RBAC. The only external identity is the GitHub account used to authenticate the Copilot SDK. Queries still carry `ownerId` for forward-compatibility with the shared ontology.
 
 ---
@@ -313,9 +331,10 @@ notegraph has no server. It is an Electron app with a clear split between the pr
 | Language | TypeScript 5.x | 1 |
 | UI framework | React 18 | 1 |
 | Markdown editor | CodeMirror 6 | 1 |
-| Local storage (content) | Filesystem in the app data directory | 1 |
-| Graph + chunk + vector store | **LadybugDB** (embedded, Cypher, on-disk) | 1 (graph used from 3) |
-| Background jobs | Node `worker_threads` / Electron `utilityProcess` + persisted job table | 3a |
+| Content storage | **User-configurable working folder** on the local filesystem (source of truth) | 1 |
+| App settings & metadata | **SQLite** (`.sqlite` file: preferences, working-folder path, groups/tags, job queue, usage log, extraction outputs) | 1 |
+| Graph + chunk + vector store | **LadybugDB** (embedded, Cypher, on-disk; rebuildable projection) | 1 (graph used from 3) |
+| Background jobs | Node `worker_threads` / Electron `utilityProcess` + SQLite-backed job queue | 3a |
 | AI (v1) | **GitHub Copilot SDK** (`@github/copilot`, TypeScript) | 3d |
 | Embeddings | **Local model** (ONNX Runtime / `transformers.js`), fully offline | 3c |
 | Document parsing | `mammoth` (docx), `pdf-parse` / `pdfjs` (pdf), built-in (txt/md) | 3b |
@@ -388,20 +407,20 @@ Switching a task to a future provider is a config edit, not a code change. The *
 
 ### 7.4 Usage Tracking
 
-Every `AgentProvider` call is recorded locally as an `AiInvocation` row (task, provider, model, token counts if available, latency) in LadybugDB, surfaced in an in-app usage view. No telemetry leaves the device.
+Every `AgentProvider` call is recorded locally as an `AiInvocation` row (task, provider, model, token counts if available, latency) in the **SQLite app database**, surfaced in an in-app usage view. No telemetry leaves the device.
 
 ---
 
 ## 8. Data & Graph Model
 
-- **Source of truth**: content files on disk — markdown notes, imported documents (kept in original form + extracted text), and `~/.notegraph/inbox/*.agent-work.md` summaries.
-- **Projection**: LadybugDB holds the ontology graph (nodes + relationships), the `Chunk` records, their local embeddings (vector index), and lightweight app metadata (groups, tags, jobs, `AiInvocation` log).
-- **Rebuildable**: because the files are authoritative, `Rebuild graph` wipes LadybugDB and re-derives the projection from the files + stored extraction outputs at any time — the same guarantee knotes gives with "Neo4j is rebuildable from Postgres," adapted to a local, file-first world.
-- **Ontology metadata everywhere**: notes carry `ownerId`, `ontologyVersion`, `reviewStatus`, `sensitivity`, and timestamps from Phase 1, so Phase 3 extraction can project them without a migration.
+The three local stores (§5.1a) map to responsibilities as follows:
+
+- **Source of truth (working folder)**: markdown notes, imported documents (kept in original form + extracted text), and the `inbox/*.agent-work.md` summaries. User-configurable location.
+- **Durable app state (SQLite)**: preferences, window state, the working-folder path, group hierarchy + tag definitions, the background-job queue, the `AiInvocation` usage log, and the **stored extraction outputs** (the structured entities/relationships the AI returned). Persisting extraction outputs here is what makes a graph rebuild fully offline — re-projection never re-calls Copilot.
+- **Rebuildable projection (LadybugDB)**: the ontology graph (nodes + relationships), the `Chunk` records, and their local embeddings (vector index). `Rebuild graph` wipes LadybugDB and re-derives it from the working folder + SQLite — the same guarantee knotes gives with "Neo4j is rebuildable from Postgres," adapted to a local, file-first world with no network dependency.
+- **Ontology metadata everywhere**: notes carry `ownerId`, `ontologyVersion`, `reviewStatus`, `sensitivity`, and timestamps (in their markdown frontmatter) from Phase 1, so Phase 3 extraction can project them without a migration.
 
 The mapping from content to ontology nodes, and the node/relationship schemas, are specified in `docs/ONTOLOGY.md`. When adding a new node type, update `ONTOLOGY.md` first, then the LadybugDB schema/constraints, then the projection step, then tests.
-
-**Open question**: whether plain relational/app-settings data (window state, preferences) lives in LadybugDB alongside the graph or in a tiny separate SQLite file. Default lean: keep it in LadybugDB to stay single-store; revisit if the relational surface grows (see §11).
 
 ---
 
@@ -429,6 +448,7 @@ This is notegraph's defining constraint:
 > **In v1, the GitHub Copilot SDK is the only thing that ever leaves the device.**
 
 - Notes, documents, groups, tags, search, and the graph view work with the network fully disabled.
+- All persisted data stays on the device: content in the user's working folder, app settings/metadata in the SQLite file, the graph in the LadybugDB file. Nothing is uploaded for storage.
 - Document parsing, chunking, embedding, and graph projection are all in-process and offline.
 - The only outbound requests are `AgentProvider` calls — entity extraction (Phase 3d) and the assistant (Phase 4) — which route through the Copilot SDK. These require a GitHub account with Copilot access, and they send the relevant prompt/content to the Copilot backend.
 - There is no analytics, telemetry, crash-reporting, auto-update ping, or font/CDN fetch that violates this. Any such need is an explicit, opt-in decision documented as a change to this guarantee.
@@ -440,8 +460,10 @@ A future **fully-offline AI mode** (a local-model `AgentProvider`, e.g. Ollama) 
 | Decision | Default | Rationale |
 |---|---|---|
 | Delivery | Electron desktop app | Cross-platform, installable, local-first |
+| Content storage | User-configurable working folder | User keeps their data somewhere durable and referenceable |
+| App settings & metadata | Single SQLite file | Durable app state that survives a graph rebuild; not in the graph |
 | Graph / vector store | LadybugDB (embedded) | No server; Cypher matches the ontology; on-disk + vector index |
-| System of record | Content files on disk | Private, portable, rebuildable projection |
+| System of record | Working-folder content + SQLite app db | Private, portable; LadybugDB is a rebuildable projection of both |
 | AI (v1) | GitHub Copilot SDK only | Single agentic provider; TypeScript; pluggable later |
 | Embeddings | Bundled local model | Keeps semantic search offline |
 | Background jobs | In-process (worker threads / utilityProcess) | No Redis/broker |
@@ -467,12 +489,13 @@ Sensitive/restricted facts are hidden from normal retrieval until explicitly acc
 
 ## 11. Open Questions
 
-1. **App-settings storage** — single-store in LadybugDB vs. a tiny separate SQLite for plain relational/preference data. Lean: single-store.
-2. **LadybugDB vector API** — confirm the exact vector-index creation/query API for the pinned LadybugDB version and how large a corpus it comfortably indexes on typical desktop hardware.
-3. **Copilot SDK embeddings** — whether the SDK exposes embeddings at all; regardless, v1 uses local embeddings, so this only matters as a possible future option.
-4. **Local embedding model choice** — which bundled model (dimension, size, speed) best balances quality vs. app-bundle size and CPU-only inference on a laptop.
-5. **Auto-update posture** — whether/how to ship updates without violating the local-only guarantee (e.g. user-initiated update checks only).
-6. **Copilot auth & offline degradation** — how AI features degrade gracefully when the user is offline or Copilot auth is absent (the app must remain fully usable minus AI).
+1. **Working-folder default & relocation** — the sensible per-OS default location, and how to handle a user moving/re-pointing the folder (re-index on change; behavior when it points at an existing folder with prior content).
+2. **Content vs. SQLite boundary for organizational metadata** — whether note-intrinsic metadata (tags applied to a note, sensitivity) lives in the note's markdown frontmatter, in SQLite, or both; group/tag *definitions* live in SQLite regardless. Lean: intrinsic metadata in frontmatter (travels with the file), definitions/assignments indexed in SQLite.
+3. **LadybugDB vector API** — confirm the exact vector-index creation/query API for the pinned LadybugDB version and how large a corpus it comfortably indexes on typical desktop hardware.
+4. **Copilot SDK embeddings** — whether the SDK exposes embeddings at all; regardless, v1 uses local embeddings, so this only matters as a possible future option.
+5. **Local embedding model choice** — which bundled model (dimension, size, speed) best balances quality vs. app-bundle size and CPU-only inference on a laptop.
+6. **Auto-update posture** — whether/how to ship updates without violating the local-only guarantee (e.g. user-initiated update checks only).
+7. **Copilot auth & offline degradation** — how AI features degrade gracefully when the user is offline or Copilot auth is absent (the app must remain fully usable minus AI).
 
 Once locked, these get documented in the appropriate spec.
 
@@ -484,11 +507,12 @@ This document and `docs/ONTOLOGY.md` are the two canonical seed documents for no
 
 ### 12.1 Hard Rules For The Coding Agent
 
-- **Honor the local-only guarantee.** No network calls except the Copilot SDK. No cloud DB, no S3, no cloud STT, no cloud embeddings, no telemetry. If a feature seems to need one, stop and surface it.
-- **LadybugDB is the embedded store.** No Neo4j server, no Postgres, no pgvector, no Redis. One on-disk database file.
+- **Honor the local-only guarantee.** No network calls except the Copilot SDK. No cloud DB, no S3, no cloud STT, no cloud embeddings, no telemetry. No data is ever uploaded for storage. If a feature seems to need any of this, stop and surface it.
+- **Three local stores, kept separate.** Content → the **user-configurable working folder** (source of truth). App settings & metadata → the **SQLite file** (never in LadybugDB, never scattered in ad-hoc config files). The knowledge graph → **LadybugDB** (rebuildable). No Neo4j server, no Postgres, no pgvector, no Redis.
+- **Let the user choose where content lives.** Persisted content (documents especially) goes in a folder the user picks in Settings; don't bury it in an opaque app-internal path.
 - **Embeddings are local.** Use the bundled model; never send text to a remote embedding API.
 - **AI goes through the `AiProvider` abstraction.** Never call the Copilot SDK directly from feature code — always through `AgentProvider`. Keep `EmbeddingProvider` local.
-- **Files are the source of truth; LadybugDB is rebuildable.** Preserve the ability to wipe and re-project the graph from disk.
+- **Working folder + SQLite are the source of truth; LadybugDB is rebuildable.** Persist extraction outputs in SQLite so the graph can be re-projected fully offline. Preserve the ability to wipe and rebuild LadybugDB at any time.
 - **Ontology is the north star.** New node types land in `docs/ONTOLOGY.md` first, then the LadybugDB schema, then the projection step, then tests.
 - **Ship phase by phase.** Phase 1 (desktop shell + notes) must be a working, installable app before Phase 2 starts. Don't pull forward Phase 3 infrastructure.
 - **Confirm the two moving-target facts at build time**: the LadybugDB vector-index API and the Copilot SDK surface (both are new in 2025–2026). Where this doc marks something "to confirm," verify against the pinned versions rather than assuming.
@@ -497,6 +521,8 @@ This document and `docs/ONTOLOGY.md` are the two canonical seed documents for no
 
 - Don't turn notegraph into a web app or add a server backend.
 - Don't add a cloud database, object storage, or message broker.
+- Don't put app settings/metadata in LadybugDB, and don't put unique source-of-truth data only in LadybugDB (it must stay rebuildable).
+- Don't hardcode the content location — it's a user-chosen working folder.
 - Don't add any network egress beyond the Copilot SDK in v1.
 - Don't hard-wire the Copilot SDK into features — keep it behind `AgentProvider`.
 - Don't add audio/STT via a cloud service (local `whisper.cpp` only, and only in a later phase).
@@ -514,11 +540,15 @@ npm run electron:dev
 # Package for the current platform
 npm run package        # electron-builder → dist/
 
-# Data locations (per-OS app data directory)
-#   notegraph.ladybug         → embedded graph + chunks + vectors + app meta
-#   notes/                    → markdown notes (source of truth)
-#   documents/                → imported documents (source of truth)
-#   ~/.notegraph/inbox/       → agent-work summaries (Phase 5)
+# Data locations
+#   Working folder (USER-CHOSEN in Settings) — source of truth:
+#     notes/                  → markdown notes
+#     documents/              → imported documents (original + extracted text)
+#     inbox/                  → agent-work summaries (Phase 5)
+#   App-data directory (per-OS) — managed by the app:
+#     notegraph.sqlite        → settings, working-folder path, groups/tags,
+#                               job queue, AiInvocation log, extraction outputs
+#     notegraph.ladybug       → graph + chunks + vectors (rebuildable projection)
 ```
 
 ### 12.4 Document Lineage
